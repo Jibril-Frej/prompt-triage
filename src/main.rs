@@ -23,6 +23,12 @@ use store::{Row, Scored, Store};
 /// How many of the most recent labels the running accuracy is computed on.
 const RECENT: usize = 50;
 
+/// Prompts longer than this many characters are reported as not trivial
+/// without scoring. The embedding model only reads the first 512 tokens
+/// (roughly 2000 characters), so a longer prompt would be judged on its
+/// beginning alone, and a long request is not a two-minute task anyway.
+const LONG_PROMPT: usize = 1500;
+
 #[derive(Parser)]
 #[command(about = "Local trivial-or-not classifier for coding-agent prompts")]
 struct Cli {
@@ -74,10 +80,20 @@ fn setup(store: &Store) -> Result<()> {
     Ok(())
 }
 
-/// Handles one UserPromptSubmit call. Reads the hook JSON on stdin, scores the
-/// prompt, keeps it pending, and prints `{"verdict":"TRIVIAL","p":0.61}` where
-/// `p` is always the probability of "trivial". Prints nothing for an empty
-/// prompt or a slash command, so the shell wrapper can stay quiet.
+/// Handles one UserPromptSubmit call. Reads the hook JSON on stdin and prints
+/// one JSON object for the shell wrapper, or nothing when the prompt should
+/// pass through untouched (empty prompt, slash command, or a label reply
+/// with nothing pending).
+///
+/// A normal prompt is scored and kept pending:
+/// `{"kind":"predict","verdict":"TRIVIAL","p":0.61}` (`p` is always the
+/// probability of "trivial"). A prompt longer than `LONG_PROMPT` is neither
+/// scored nor kept pending: `{"kind":"predict","verdict":"NOT","p":0.0,"long":true}`.
+///
+/// A label reply (`t`, `n`, `trivial` or `not`, any case) labels the pending
+/// prompt, refits the classifier and returns that prompt so the wrapper can
+/// hand it to the model:
+/// `{"kind":"label","label":"TRIVIAL","rows":12,"recent":12,"accuracy":0.58,"prompt":"..."}`.
 fn hook(store: &Store) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
@@ -86,16 +102,42 @@ fn hook(store: &Store) -> Result<()> {
     if prompt.is_empty() || prompt.starts_with('/') {
         return Ok(());
     }
+    if let Some(trivial) = parse_label(prompt) {
+        let Some(pending) = store.read_pending()? else {
+            return Ok(());
+        };
+        store.clear_pending()?;
+        let text = pending.prompt.clone();
+        let (rows, acc) = record(store, pending, trivial)?;
+        println!(
+            "{}",
+            json!({ "kind": "label", "label": label_name(trivial), "rows": rows, "recent": RECENT.min(rows), "accuracy": acc, "prompt": text })
+        );
+        return Ok(());
+    }
+    if prompt.chars().count() > LONG_PROMPT {
+        println!("{}", json!({ "kind": "predict", "verdict": "NOT", "p": 0.0, "long": true }));
+        return Ok(());
+    }
     let scored = score(store, prompt)?;
     store.write_pending(&scored)?;
     // Convert to f64 before rounding: JSON prints an f32 like 0.67 as 0.6700000166893005.
     let p = (scored.p as f64 * 100.0).round() / 100.0;
-    println!("{}", json!({ "verdict": verdict(scored.p), "p": p }));
+    println!("{}", json!({ "kind": "predict", "verdict": verdict(scored.p), "p": p }));
     Ok(())
 }
 
-/// Attaches the label to the pending prompt. The PostToolUse hook calls this
-/// with the answer the user picked.
+/// Recognises a label reply: `t`/`trivial` gives `Some(true)`, `n`/`not`
+/// gives `Some(false)`, anything else `None`. Case does not matter.
+fn parse_label(prompt: &str) -> Option<bool> {
+    match prompt.to_ascii_lowercase().as_str() {
+        "t" | "trivial" => Some(true),
+        "n" | "not" => Some(false),
+        _ => None,
+    }
+}
+
+/// Attaches the label to the pending prompt by hand (the hook normally does it).
 fn label_pending(store: &Store, trivial: bool) -> Result<()> {
     let scored = store.read_pending()?.context("no pending prompt to label")?;
     store.clear_pending()?;
