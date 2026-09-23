@@ -6,8 +6,8 @@ from your answer to every guess. No LLM call, no cloud: a sentence-embedding
 model runs locally and a logistic regression on top of it is refitted after
 each label.
 
-Built as a [Claude Code](https://claude.com/claude-code) `UserPromptSubmit`
-hook, but the binary is plain stdin/stdout and can be wired to anything.
+Built as a pair of [Claude Code](https://claude.com/claude-code) hooks, but
+the binary is plain stdin/stdout and can be wired to anything.
 
 ## Why
 
@@ -18,28 +18,31 @@ definition of trivial from the labels you give.
 
 ## How the loop works
 
-1. You submit a prompt. The hook embeds it with all-MiniLM-L6-v2, scores it with
-   the current weights, and **blocks** the prompt with a message such as
-   `triage: TRIVIAL (0.67). Resubmit with t: (trivial) or n: (not trivial) in front to label it.`
-   Nothing reaches the model.
-2. You press up-arrow, add `t:` or `n:` in front, and submit again. The hook
-   records your label for the pending prompt, refits the classifier on the
-   whole dataset, shows `triage: labeled TRIVIAL; 12 rows; accuracy over last 12: 58%`,
-   and lets the prompt through.
-3. If you said trivial, the hook also injects the guide text from `triage.sh`
-   so the model points you to the file or gives a hint instead of doing the
-   work. If you said not trivial, the model handles the request normally.
+1. You submit a prompt. The `UserPromptSubmit` hook (`triage.sh`) embeds it
+   with all-MiniLM-L6-v2, scores it with the current weights, shows
+   `triage: TRIVIAL (0.67)` and tells the model to ask you one question before
+   doing anything else.
+2. The model calls `AskUserQuestion` with the prediction and two options,
+   **Trivial** and **Not trivial**. You pick one.
+3. The `PostToolUse` hook on `AskUserQuestion` (`triage-answer.sh`) records
+   your answer for the pending prompt, refits the classifier on the whole
+   dataset and shows `triage: labeled TRIVIAL; 12 rows; accuracy over last 12: 58%`.
+4. If you said trivial, that hook also injects the guide text so the model
+   points you to the file or gives a hint instead of doing the work. If you
+   said not trivial, the model handles the request normally.
 
 The model acts on your label, never on the prediction. The prediction is only
 there for you to check; the running accuracy tells you how often it is right.
-The first predictions come from random weights, so they are a coin flip.
+The first predictions come from random weights, so they are a coin flip, and
+the weights stay random until both labels have been seen at least once (a fit
+on one class would predict that class for everything).
 
 There is no query selection (the "active" part of active learning): every
-prompt is labeled. Once accuracy is high, a natural next step is to only block
+prompt is labeled. Once accuracy is high, a natural next step is to only ask
 when the probability is close to 0.5.
 
-A prompt with a `t:` or `n:` prefix that matches nothing pending is labeled
-directly, so you can also skip the round trip by typing the label up front.
+The question itself is asked by the model, so it depends on the model
+following the injected instruction; the recording and the refit do not.
 
 ## Install
 
@@ -72,14 +75,15 @@ triage predict "<text>"  score a text without keeping it pending
 triage stats             dataset size, class balance, accuracy
 ```
 
-`triage hook` prints `{"kind":"predict","verdict":"TRIVIAL","p":0.67}` for a
-plain prompt, `{"kind":"label","label":"TRIVIAL","rows":12,"recent":12,"accuracy":0.58}`
-for a prefixed one, and nothing for an empty prompt or a slash command.
+`triage hook` prints `{"verdict":"TRIVIAL","p":0.67}` (`p` is the probability
+of trivial) and nothing for an empty prompt or a slash command. `triage label`
+prints one line, `labeled TRIVIAL; 12 rows; accuracy over last 12: 58%`.
 
 ## Claude Code setup
 
-Save the script below as `~/.claude/hooks/triage.sh` and make it executable,
-then register it in `~/.claude/settings.json`:
+Save the two scripts below as `~/.claude/hooks/triage.sh` and
+`~/.claude/hooks/triage-answer.sh`, make them executable, then register them
+in `~/.claude/settings.json`:
 
 ```json
 {
@@ -87,7 +91,15 @@ then register it in `~/.claude/settings.json`:
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "~/.claude/hooks/triage.sh", "timeout": 10 }
+          { "type": "command", "command": "~/.claude/hooks/triage.sh", "timeout": 20 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          { "type": "command", "command": "~/.claude/hooks/triage-answer.sh", "timeout": 10 }
         ]
       }
     ]
@@ -95,40 +107,73 @@ then register it in `~/.claude/settings.json`:
 }
 ```
 
-Open `/hooks` once (or restart) so the new settings are picked up. The script
-itself is re-read on every prompt, so editing it needs no reload.
+Open `/hooks` once (or restart) so the new settings are picked up. The scripts
+themselves are re-read on every call, so editing them needs no reload.
+
+`triage.sh`, run on every prompt:
 
 ```bash
 #!/usr/bin/env bash
-# UserPromptSubmit hook: deterministic label-then-act loop with the local
-# `triage` classifier (https://github.com/Jibril-Frej/prompt-triage).
-#
-# 1. A plain prompt is scored and BLOCKED; the verdict is shown to the user.
-# 2. The user resubmits it with a `t:` (trivial) or `n:` (not) prefix. The
-#    hook records the label, refits the model and lets the prompt through.
-# 3. If the label is trivial, the guide text below is injected so the model
-#    hints instead of doing. No model call is involved in labeling.
+# UserPromptSubmit hook for prompt-triage (https://github.com/Jibril-Frej/prompt-triage).
+# Scores the prompt with the local classifier, shows the prediction, and tells
+# the model to let the user confirm the label with AskUserQuestion before doing
+# anything. The answer is recorded by triage-answer.sh, a PostToolUse hook on
+# AskUserQuestion, which also tells the model how to proceed.
 
 triage=$(command -v triage || echo "$HOME/.cargo/bin/triage")
 log="$HOME/.local/share/prompt-triage/hook.log"
 
-# `triage hook` reads the hook JSON from stdin and prints one JSON line:
-# {"kind":"predict","verdict":"TRIVIAL","p":0.61} or
-# {"kind":"label","label":"TRIVIAL","rows":12,"recent":12,"accuracy":0.58}.
-# It prints nothing for slash commands and empty prompts; errors go to the log.
+# `triage hook` reads the hook JSON from stdin and prints {"verdict":"TRIVIAL","p":0.61}
+# (p is the probability of trivial), or nothing for slash commands and empty
+# prompts. Errors go to the log file.
 out=$("$triage" hook 2>>"$log")
 [ -z "$out" ] && exit 0
+msg=$(jq -r '"triage: \(.verdict) (\(.p))"' <<<"$out")
 
-if [ "$(jq -r .kind <<<"$out")" = predict ]; then
-  reason=$(jq -r '"triage: \(.verdict) (\(.p)). Resubmit with t: (trivial) or n: (not trivial) in front to label it."' <<<"$out")
-  jq -n --arg r "$reason" '{decision: "block", reason: $r}'
-  exit 0
-fi
+context="[triage hook] Prediction for this prompt: $msg.
+Before anything else, call AskUserQuestion with exactly one question:
+  header: \"triage\"
+  question: \"$msg. Is this request trivial?\"
+  options: \"Trivial\" and \"Not trivial\"
+A hook records the answer and then tells you how to proceed. Do not run any other tool and do not start answering before that."
 
-# What the main model must do when the user labeled the request trivial.
+jq -n --arg msg "$msg" --arg ctx "$context" \
+  '{systemMessage: $msg, hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}'
+exit 0
+```
+
+`triage-answer.sh`, run after every `AskUserQuestion` call (it ignores
+questions whose header is not `triage`):
+
+```bash
+#!/usr/bin/env bash
+# PostToolUse hook on AskUserQuestion for prompt-triage
+# (https://github.com/Jibril-Frej/prompt-triage). When the question is the
+# triage one (header "triage"), records the chosen option as the label, refits
+# the classifier, and tells the model how to proceed.
+
+triage=$(command -v triage || echo "$HOME/.cargo/bin/triage")
+log="$HOME/.local/share/prompt-triage/hook.log"
+
+input=$(cat)
+header=$(jq -r '.tool_input.questions[0].header // ""' <<<"$input")
+[ "$header" = triage ] || exit 0
+
+# The chosen option: an `answers` object keyed by question text, in the tool
+# response (or in the tool input when a PreToolUse hook answered for the user).
+answer=$(jq -r '[.tool_response, .tool_input] | map(.answers? | objects | to_entries[0].value) | first // ""' <<<"$input")
+case "$answer" in
+  "Not trivial") label=not ;;
+  "Trivial")     label=trivial ;;
+  *) echo "triage-answer: no usable answer ($answer) in: $input" >>"$log"; exit 0 ;;
+esac
+
+result=$("$triage" label "$label" 2>>"$log") || exit 0
+
+# What the main model must do when the user says the request is trivial.
 # Edit this block freely: it is the user-visible behaviour and tone.
 guide=$(cat <<'EOF'
-[triage hook] This request looks trivial: something the user can do themselves in under two minutes.
+This request looks trivial: something the user can do themselves in under two minutes.
 Do NOT do it. Do not edit files and do not run the command. Instead:
 - for a code or config change: name the file and say what to change in one or two sentences;
 - for a shell command: give a hint (but not the full command) and stop.
@@ -136,19 +181,20 @@ Then end the turn. If the user replies that they want you to do it anyway, do it
 EOF
 )
 
-msg=$(jq -r '"triage: labeled \(.label); \(.rows) rows; accuracy over last \(.recent): \((.accuracy * 100) | round)%"' <<<"$out")
-context="[triage hook] The leading t: or n: in the prompt is a label marker for the triage hook; ignore it."
-if [ "$(jq -r .label <<<"$out")" = TRIVIAL ]; then
-  context="$context
+if [ "$label" = trivial ]; then
+  context="[triage hook] $result. The user says this request is trivial.
 $guide"
+else
+  context="[triage hook] $result. The user says this request is not trivial: handle it normally."
 fi
-jq -n --arg msg "$msg" --arg ctx "$context" \
-  '{systemMessage: $msg, hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}'
+jq -n --arg msg "triage: $result" --arg ctx "$context" \
+  '{systemMessage: $msg, hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $ctx}}'
 exit 0
 ```
 
 The `guide` block is the only user-visible behaviour; edit it to change what
-the model does or its tone.
+the model does or its tone. If the model ever answers the question in a form
+the script does not recognise, the full hook input is appended to `hook.log`.
 
 ## The classifier
 

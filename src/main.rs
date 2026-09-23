@@ -74,16 +74,10 @@ fn setup(store: &Store) -> Result<()> {
     Ok(())
 }
 
-/// Handles one hook call. Reads the UserPromptSubmit JSON on stdin and prints
-/// one JSON object for the shell wrapper, or nothing when the prompt should
-/// pass through untouched (empty prompt or slash command).
-///
-/// A plain prompt is scored and kept pending:
-/// `{"kind":"predict","verdict":"TRIVIAL","p":0.61}`.
-/// A prompt starting with `t:` or `n:` carries a label. It is recorded for the
-/// pending prompt if the text matches, otherwise for the text itself, and the
-/// classifier is refitted:
-/// `{"kind":"label","label":"TRIVIAL","rows":12,"recent":12,"accuracy":0.58}`.
+/// Handles one UserPromptSubmit call. Reads the hook JSON on stdin, scores the
+/// prompt, keeps it pending, and prints `{"verdict":"TRIVIAL","p":0.61}` where
+/// `p` is always the probability of "trivial". Prints nothing for an empty
+/// prompt or a slash command, so the shell wrapper can stay quiet.
 fn hook(store: &Store) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
@@ -92,43 +86,16 @@ fn hook(store: &Store) -> Result<()> {
     if prompt.is_empty() || prompt.starts_with('/') {
         return Ok(());
     }
-    let Some((trivial, text)) = strip_label(prompt) else {
-        let scored = score(store, prompt)?;
-        store.write_pending(&scored)?;
-        // Convert to f64 before rounding: JSON prints an f32 like 0.67 as 0.6700000166893005.
-        let p = (scored.p as f64 * 100.0).round() / 100.0;
-        println!("{}", json!({ "kind": "predict", "verdict": verdict(scored.p), "p": p }));
-        return Ok(());
-    };
-    if text.is_empty() {
-        return Ok(());
-    }
-    let scored = match store.read_pending()? {
-        Some(pending) if pending.prompt == text => pending,
-        _ => score(store, text)?,
-    };
-    store.clear_pending()?;
-    let (rows, acc) = record(store, scored, trivial)?;
-    println!(
-        "{}",
-        json!({ "kind": "label", "label": label_name(trivial), "rows": rows, "recent": RECENT.min(rows), "accuracy": acc })
-    );
+    let scored = score(store, prompt)?;
+    store.write_pending(&scored)?;
+    // Convert to f64 before rounding: JSON prints an f32 like 0.67 as 0.6700000166893005.
+    let p = (scored.p as f64 * 100.0).round() / 100.0;
+    println!("{}", json!({ "verdict": verdict(scored.p), "p": p }));
     Ok(())
 }
 
-/// Splits a `t:` or `n:` prefix (any case) off a prompt. Returns the label
-/// (`true` = trivial) and the rest of the prompt, trimmed.
-fn strip_label(prompt: &str) -> Option<(bool, &str)> {
-    let (head, rest) = prompt.split_at_checked(2)?;
-    let trivial = match head.to_ascii_lowercase().as_str() {
-        "t:" => true,
-        "n:" => false,
-        _ => return None,
-    };
-    Some((trivial, rest.trim()))
-}
-
-/// Attaches the label to the pending prompt by hand (the hook normally does it).
+/// Attaches the label to the pending prompt. The PostToolUse hook calls this
+/// with the answer the user picked.
 fn label_pending(store: &Store, trivial: bool) -> Result<()> {
     let scored = store.read_pending()?.context("no pending prompt to label")?;
     store.clear_pending()?;
@@ -146,12 +113,19 @@ fn label_pending(store: &Store, trivial: bool) -> Result<()> {
 /// Appends the labeled row to the dataset and refits the weights on everything
 /// labeled so far. Returns the dataset size and the accuracy over the most
 /// recent rows.
+///
+/// Until both classes are present the weights are left as they are (the random
+/// ones from setup): a refit on rows of a single class would predict that class
+/// for everything with near certainty.
 fn record(store: &Store, scored: Scored, trivial: bool) -> Result<(usize, f32)> {
     store.append_row(&Row { scored, label: trivial })?;
     let rows = store.read_dataset()?;
-    let examples: Vec<(&[f32], bool)> =
-        rows.iter().map(|r| (r.scored.embedding.as_slice(), r.label)).collect();
-    store.write_weights(&train(&examples, DIM))?;
+    let both_classes = rows.iter().any(|r| r.label) && rows.iter().any(|r| !r.label);
+    if both_classes {
+        let examples: Vec<(&[f32], bool)> =
+            rows.iter().map(|r| (r.scored.embedding.as_slice(), r.label)).collect();
+        store.write_weights(&train(&examples, DIM))?;
+    }
     let recent = rows.iter().rev().take(RECENT).map(|r| (r.scored.p, r.label));
     Ok((rows.len(), accuracy(recent)))
 }
