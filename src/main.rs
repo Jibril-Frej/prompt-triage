@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
 use embed::{DIM, Embedder};
-use model::{Weights, accuracy, train};
+use model::{Weights, accuracy, balanced_accuracy, train};
 use store::{Row, Scored, Store};
 
 /// How many of the most recent labels the running accuracy is computed on.
@@ -94,7 +94,7 @@ fn setup(store: &Store) -> Result<()> {
 /// A label reply (`t`, `n`, `trivial` or `not`, any case) labels the pending
 /// prompt, refits the classifier and returns that prompt so the wrapper can
 /// hand it to the model:
-/// `{"kind":"label","label":"TRIVIAL","rows":12,"recent":12,"accuracy":0.58,"prompt":"..."}`.
+/// `{"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"balanced_accuracy":0.55,"prompt":"..."}`.
 fn hook(store: &Store) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
@@ -109,10 +109,10 @@ fn hook(store: &Store) -> Result<()> {
         };
         store.clear_pending()?;
         let text = pending.prompt.clone();
-        let (rows, acc, nb_trivial) = record(store, pending, trivial)?;
+        let report = record(store, pending, trivial)?;
         println!(
             "{}",
-            json!({ "kind": "label", "label": label_name(trivial), "rows": rows, "trivial_rows": nb_trivial, "recent": RECENT.min(rows), "accuracy": acc, "prompt": text })
+            json!({ "kind": "label", "label": label_name(trivial), "rows": report.rows, "trivial_rows": report.trivial_rows, "recent": RECENT.min(report.rows), "accuracy": report.accuracy, "balanced_accuracy": report.balanced_accuracy, "prompt": text })
         );
         return Ok(());
     }
@@ -151,33 +151,44 @@ fn label_pending(store: &Store, trivial: bool) -> Result<()> {
         .read_pending()?
         .context("no pending prompt to label")?;
     store.clear_pending()?;
-    let (rows, acc, nb_trivial) = record(store, scored, trivial)?;
+    let report = record(store, scored, trivial)?;
     println!(
-        "labeled {}; {} rows ({} trivial, {} not); accuracy over last {}: {:.0}%",
+        "labeled {}; {} rows ({} trivial, {} not); accuracy over last {}: {:.0}% (balanced {:.0}%)",
         label_name(trivial),
-        rows,
-        nb_trivial,
-        rows - nb_trivial,
-        RECENT.min(rows),
-        100.0 * acc
+        report.rows,
+        report.trivial_rows,
+        report.rows - report.trivial_rows,
+        RECENT.min(report.rows),
+        100.0 * report.accuracy,
+        100.0 * report.balanced_accuracy
     );
     Ok(())
 }
 
+/// What `record` reports after a label: the dataset size, how many rows are
+/// trivial, and the accuracy and balanced accuracy over the `RECENT` most
+/// recent rows. A struct rather than a tuple so the two counts and the two
+/// rates cannot be mixed up at the call site.
+struct Report {
+    rows: usize,
+    trivial_rows: usize,
+    accuracy: f32,
+    balanced_accuracy: f32,
+}
+
 /// Appends the labeled row to the dataset and refits the weights on everything
-/// labeled so far. Returns the dataset size and the accuracy over the most
-/// recent rows.
+/// labeled so far.
 ///
 /// Until both classes are present the weights are left as they are (the random
 /// ones from setup): a refit on rows of a single class would predict that class
 /// for everything with near certainty.
-fn record(store: &Store, scored: Scored, trivial: bool) -> Result<(usize, f32, usize)> {
+fn record(store: &Store, scored: Scored, trivial: bool) -> Result<Report> {
     store.append_row(&Row {
         scored,
         label: trivial,
     })?;
     let rows = store.read_dataset()?;
-    let nb_trivial = rows.iter().filter(|r| r.label).count();
+    let trivial_rows = rows.iter().filter(|r| r.label).count();
     let both_classes = rows.iter().any(|r| r.label) && rows.iter().any(|r| !r.label);
     if both_classes {
         let examples: Vec<(&[f32], bool)> = rows
@@ -186,12 +197,19 @@ fn record(store: &Store, scored: Scored, trivial: bool) -> Result<(usize, f32, u
             .collect();
         store.write_weights(&train(&examples, DIM))?;
     }
-    let recent = rows
+    // Collected into a Vec because the pairs are walked twice, once per rate.
+    let recent: Vec<(f32, bool)> = rows
         .iter()
         .rev()
         .take(RECENT)
-        .map(|r| (r.scored.p, r.label));
-    Ok((rows.len(), accuracy(recent), nb_trivial))
+        .map(|r| (r.scored.p, r.label))
+        .collect();
+    Ok(Report {
+        rows: rows.len(),
+        trivial_rows,
+        accuracy: accuracy(recent.iter().copied()),
+        balanced_accuracy: balanced_accuracy(recent.iter().copied()),
+    })
 }
 
 /// Scores `text` and prints the verdict, for trying the model by hand.
@@ -201,28 +219,29 @@ fn predict(store: &Store, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Prints dataset size, how many rows are trivial, and accuracy overall and
-/// over the most recent rows.
+/// Prints dataset size, how many rows are trivial, and accuracy and balanced
+/// accuracy overall and over the most recent rows.
 fn stats(store: &Store) -> Result<()> {
     let rows = store.read_dataset()?;
     let trivial = rows.iter().filter(|r| r.label).count();
-    let all = rows.iter().map(|r| (r.scored.p, r.label));
-    let recent = rows
-        .iter()
-        .rev()
-        .take(RECENT)
-        .map(|r| (r.scored.p, r.label));
+    let all: Vec<(f32, bool)> = rows.iter().map(|r| (r.scored.p, r.label)).collect();
+    let recent = &all[all.len().saturating_sub(RECENT)..];
     println!(
         "rows: {} ({} trivial, {} not)",
         rows.len(),
         trivial,
         rows.len() - trivial
     );
-    println!("accuracy overall: {:.0}%", 100.0 * accuracy(all));
     println!(
-        "accuracy last {}: {:.0}%",
-        RECENT.min(rows.len()),
-        100.0 * accuracy(recent)
+        "accuracy overall: {:.0}% (balanced {:.0}%)",
+        100.0 * accuracy(all.iter().copied()),
+        100.0 * balanced_accuracy(all.iter().copied())
+    );
+    println!(
+        "accuracy last {}: {:.0}% (balanced {:.0}%)",
+        recent.len(),
+        100.0 * accuracy(recent.iter().copied()),
+        100.0 * balanced_accuracy(recent.iter().copied())
     );
     Ok(())
 }

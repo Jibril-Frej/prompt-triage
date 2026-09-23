@@ -41,7 +41,10 @@ impl Weights {
     /// Weights that are all zero; `predict` then returns exactly 0.5.
     /// This is the starting point of every refit.
     pub fn zeros(dim: usize) -> Weights {
-        Weights { w: vec![0.0; dim], b: 0.0 }
+        Weights {
+            w: vec![0.0; dim],
+            b: 0.0,
+        }
     }
 
     /// Probability that `x` is trivial: sigmoid(w · x + b).
@@ -101,7 +104,50 @@ pub fn accuracy<'a>(pairs: impl IntoIterator<Item = (f32, bool)>) -> f32 {
             correct += 1;
         }
     }
-    if total == 0 { 0.0 } else { correct as f32 / total as f32 }
+    if total == 0 {
+        0.0
+    } else {
+        correct as f32 / total as f32
+    }
+}
+
+/// Mean of the per-class hit rates: the fraction of trivial rows predicted
+/// trivial, averaged with the fraction of not-trivial rows predicted not
+/// trivial. Unlike `accuracy` it is not inflated by an unbalanced dataset:
+/// always predicting the majority class scores 0.5 here. A class with no rows
+/// is left out of the mean, so with a single class this equals `accuracy`;
+/// returns 0 for an empty input.
+pub fn balanced_accuracy(pairs: impl IntoIterator<Item = (f32, bool)>) -> f32 {
+    let (mut trivial, mut trivial_ok, mut not, mut not_ok) = (0, 0, 0, 0);
+    for (p, label) in pairs {
+        let right = (p >= 0.5) == label;
+        if label {
+            trivial += 1;
+            if right {
+                trivial_ok += 1;
+            }
+        } else {
+            not += 1;
+            if right {
+                not_ok += 1;
+            }
+        }
+    }
+    let mut sum = 0.0;
+    let mut classes = 0;
+    if trivial > 0 {
+        sum += trivial_ok as f32 / trivial as f32;
+        classes += 1;
+    }
+    if not > 0 {
+        sum += not_ok as f32 / not as f32;
+        classes += 1;
+    }
+    if classes == 0 {
+        0.0
+    } else {
+        sum / classes as f32
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +177,14 @@ mod tests {
         let weights = train(&examples, 3);
         let acc = accuracy(examples.iter().map(|(x, y)| (weights.predict(x), *y)));
         assert!(acc > 0.95, "accuracy was {acc}");
+    }
+
+    /// Predicting "trivial" for everything is right on 3 rows out of 4 but
+    /// finds none of the not-trivial rows: accuracy 0.75, balanced 0.5.
+    #[test]
+    fn balanced_accuracy_ignores_class_imbalance() {
+        let pairs = [(0.9, true), (0.8, true), (0.7, true), (0.6, false)];
+        assert_eq!(accuracy(pairs), 0.75);
+        assert_eq!(balanced_accuracy(pairs), 0.5);
     }
 }

@@ -26,7 +26,7 @@ definition of trivial from the labels you give.
 2. You reply with a single `t` or `n` (or `trivial` / `not`, any case). The
    hook records your label for the pending prompt, refits the classifier on
    the whole dataset and shows
-   `triage: labeled TRIVIAL; 12 rows (5 trivial, 7 not); accuracy over last 12: 58%`.
+   `triage: labeled TRIVIAL; 12 rows (5 trivial, 7 not); accuracy over last 12: 58% (balanced 55%)`.
 3. Your reply goes to the model with the original prompt injected as context,
    so the model answers the original prompt. If you said trivial, the hook
    also injects the guide text so the model points you to the file or gives a
@@ -38,6 +38,9 @@ appears about 150 ms after you press enter.
 
 The model acts on your label, never on the prediction. The prediction is only
 there for you to check; the running accuracy tells you how often it is right.
+The balanced accuracy is the mean of the hit rate on trivial prompts and the
+hit rate on not-trivial ones, so it stays at 50% for a model that always
+answers the majority class, where plain accuracy would look good.
 The first predictions come from random weights, so they are a coin flip, and
 the weights stay random until both labels have been seen at least once (a fit
 on one class would predict that class for everything).
@@ -84,14 +87,14 @@ triage setup             download the model, create random initial weights
 triage hook              read UserPromptSubmit JSON on stdin, print one JSON line (used by the hook script)
 triage label trivial|not label the pending prompt by hand and refit
 triage predict "<text>"  score a text without keeping it pending
-triage stats             dataset size, class balance, accuracy
+triage stats             dataset size, class balance, accuracy and balanced accuracy
 ```
 
 `triage hook` prints `{"kind":"predict","verdict":"TRIVIAL","p":0.67,"chars":42}`
 for a prompt (`p` is the probability of trivial, `chars` the length of the
 prompt; `"long":true` is added when the prompt was too long to score),
-`{"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"prompt":"..."}`
-for a label reply, and nothing for an empty prompt, a slash command, or a
+`{"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"balanced_accuracy":0.55,"prompt":"..."}`
+for a label reply (both rates are over the `recent` rows), and nothing for an empty prompt, a slash command, or a
 label reply with nothing pending.
 
 ## Claude Code setup
@@ -134,7 +137,7 @@ log="$HOME/.local/share/prompt-triage/hook.log"
 # `triage hook` reads the hook JSON from stdin and prints one JSON line:
 # {"kind":"predict","verdict":"TRIVIAL","p":0.61,"chars":42}, with "long":true
 # when the prompt was too long to score, or
-# {"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"prompt":"..."}.
+# {"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"balanced_accuracy":0.55,"prompt":"..."}.
 # It prints nothing for slash commands, empty prompts, and a label reply with
 # nothing pending; errors go to the log file.
 out=$("$triage" hook 2>>"$log")
@@ -162,7 +165,7 @@ Then end the turn. If the user replies that they want you to do it anyway, do it
 EOF
 )
 
-msg=$(jq -r '"triage: labeled \(.label); \(.rows) rows (\(.trivial_rows) trivial, \(.rows - .trivial_rows) not); accuracy over last \(.recent): \((.accuracy * 100) | round)%"' <<<"$out")
+msg=$(jq -r '"triage: labeled \(.label); \(.rows) rows (\(.trivial_rows) trivial, \(.rows - .trivial_rows) not); accuracy over last \(.recent): \((.accuracy * 100) | round)% (balanced \((.balanced_accuracy * 100) | round)%)"' <<<"$out")
 prompt=$(jq -r .prompt <<<"$out")
 context="[triage hook] The user's message above is only a label reply for the triage hook. Their actual request is the following; answer it:
 $prompt"
