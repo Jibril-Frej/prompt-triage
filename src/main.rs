@@ -86,9 +86,10 @@ fn setup(store: &Store) -> Result<()> {
 /// with nothing pending).
 ///
 /// A normal prompt is scored and kept pending:
-/// `{"kind":"predict","verdict":"TRIVIAL","p":0.61}` (`p` is always the
-/// probability of "trivial"). A prompt longer than `LONG_PROMPT` is neither
-/// scored nor kept pending: `{"kind":"predict","verdict":"NOT","p":0.0,"long":true}`.
+/// `{"kind":"predict","verdict":"TRIVIAL","p":0.61,"chars":42}` (`p` is always
+/// the probability of "trivial", `chars` the length of the prompt). A prompt
+/// longer than `LONG_PROMPT` is neither scored nor kept pending:
+/// `{"kind":"predict","verdict":"NOT","p":0.0,"chars":1830,"long":true}`.
 ///
 /// A label reply (`t`, `n`, `trivial` or `not`, any case) labels the pending
 /// prompt, refits the classifier and returns that prompt so the wrapper can
@@ -115,10 +116,11 @@ fn hook(store: &Store) -> Result<()> {
         );
         return Ok(());
     }
-    if prompt.chars().count() > LONG_PROMPT {
+    let chars = prompt.chars().count();
+    if chars > LONG_PROMPT {
         println!(
             "{}",
-            json!({ "kind": "predict", "verdict": "NOT", "p": 0.0, "long": true })
+            json!({ "kind": "predict", "verdict": "NOT", "p": 0.0, "chars": chars, "long": true })
         );
         return Ok(());
     }
@@ -128,7 +130,7 @@ fn hook(store: &Store) -> Result<()> {
     let p = (scored.p as f64 * 100.0).round() / 100.0;
     println!(
         "{}",
-        json!({ "kind": "predict", "verdict": verdict(scored.p), "p": p })
+        json!({ "kind": "predict", "verdict": verdict(scored.p), "p": p, "chars": chars })
     );
     Ok(())
 }

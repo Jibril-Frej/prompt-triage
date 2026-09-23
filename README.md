@@ -20,13 +20,13 @@ definition of trivial from the labels you give.
 
 1. You submit a prompt. The hook embeds it with all-MiniLM-L6-v2, scores it
    with the current weights, keeps it pending, and **blocks** it with the
-   message `triage: TRIVIAL (0.67). Reply t (trivial) or n (not trivial).`
+   message `triage: TRIVIAL (0.67, 42 chars). Reply t (trivial) or n (not trivial).`
    Claude Code shows your prompt under that message. Nothing has been sent to
    the model yet.
 2. You reply with a single `t` or `n` (or `trivial` / `not`, any case). The
    hook records your label for the pending prompt, refits the classifier on
    the whole dataset and shows
-   `triage: labeled TRIVIAL; 12 rows; accuracy over last 12: 58%`.
+   `triage: labeled TRIVIAL; 12 rows (5 trivial, 7 not); accuracy over last 12: 58%`.
 3. Your reply goes to the model with the original prompt injected as context,
    so the model answers the original prompt. If you said trivial, the hook
    also injects the guide text so the model points you to the file or gives a
@@ -43,7 +43,8 @@ the weights stay random until both labels have been seen at least once (a fit
 on one class would predict that class for everything).
 
 Prompts longer than 1500 characters are reported as not trivial without
-scoring and go straight through, unlabeled. The embedding model only reads
+scoring, with `triage: NOT (1830 chars: long prompt, not scored)`, and go
+straight through, unlabeled. The embedding model only reads
 the first 512 tokens (about 2000 characters), so a longer prompt would be
 judged on its beginning alone, and a long request is not a two-minute task
 anyway.
@@ -86,10 +87,10 @@ triage predict "<text>"  score a text without keeping it pending
 triage stats             dataset size, class balance, accuracy
 ```
 
-`triage hook` prints `{"kind":"predict","verdict":"TRIVIAL","p":0.67}` for a
-prompt (`p` is the probability of trivial; `"long":true` is added when the
-prompt was too long to score),
-`{"kind":"label","label":"TRIVIAL","rows":12,"recent":12,"accuracy":0.58,"prompt":"..."}`
+`triage hook` prints `{"kind":"predict","verdict":"TRIVIAL","p":0.67,"chars":42}`
+for a prompt (`p` is the probability of trivial, `chars` the length of the
+prompt; `"long":true` is added when the prompt was too long to score),
+`{"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"prompt":"..."}`
 for a label reply, and nothing for an empty prompt, a slash command, or a
 label reply with nothing pending.
 
@@ -131,9 +132,9 @@ triage=$(command -v triage || echo "$HOME/.cargo/bin/triage")
 log="$HOME/.local/share/prompt-triage/hook.log"
 
 # `triage hook` reads the hook JSON from stdin and prints one JSON line:
-# {"kind":"predict","verdict":"TRIVIAL","p":0.61}, with "long":true when the
-# prompt was too long to score, or
-# {"kind":"label","label":"TRIVIAL","rows":12,"recent":12,"accuracy":0.58,"prompt":"..."}.
+# {"kind":"predict","verdict":"TRIVIAL","p":0.61,"chars":42}, with "long":true
+# when the prompt was too long to score, or
+# {"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"prompt":"..."}.
 # It prints nothing for slash commands, empty prompts, and a label reply with
 # nothing pending; errors go to the log file.
 out=$("$triage" hook 2>>"$log")
@@ -141,10 +142,10 @@ out=$("$triage" hook 2>>"$log")
 
 if [ "$(jq -r .kind <<<"$out")" = predict ]; then
   if [ "$(jq -r '.long // false' <<<"$out")" = true ]; then
-    jq -n '{systemMessage: "triage: NOT (long prompt, not scored)"}'
+    jq '{systemMessage: "triage: NOT (\(.chars) chars: long prompt, not scored)"}' <<<"$out"
     exit 0
   fi
-  reason=$(jq -r '"triage: \(.verdict) (\(.p)). Reply t (trivial) or n (not trivial)."' <<<"$out")
+  reason=$(jq -r '"triage: \(.verdict) (\(.p), \(.chars) chars). Reply t (trivial) or n (not trivial)."' <<<"$out")
   jq -n --arg r "$reason" '{decision: "block", reason: $r}'
   exit 0
 fi
@@ -161,7 +162,8 @@ Then end the turn. If the user replies that they want you to do it anyway, do it
 EOF
 )
 
-msg=$(jq -r '"triage: labeled \(.label); \(.rows) rows (\(.trivial_rows) trivial, \(.rows - .trivial_rows) not); accuracy over last \(.recent): \((.accuracy * 100) | round)%"' <<<"$out")prompt=$(jq -r .prompt <<<"$out")
+msg=$(jq -r '"triage: labeled \(.label); \(.rows) rows (\(.trivial_rows) trivial, \(.rows - .trivial_rows) not); accuracy over last \(.recent): \((.accuracy * 100) | round)%"' <<<"$out")
+prompt=$(jq -r .prompt <<<"$out")
 context="[triage hook] The user's message above is only a label reply for the triage hook. Their actual request is the following; answer it:
 $prompt"
 if [ "$(jq -r .label <<<"$out")" = TRIVIAL ]; then
@@ -196,7 +198,7 @@ refit takes about 6 ms at 10 rows, 24 ms at 100 and 120 ms at 1000 on a
 If you make a change to the codebase, remember to rebuild and reinstall:
 
 ```
-cargo install --path . 
+cargo install --path .
 ```
 
 
