@@ -221,11 +221,23 @@ fn predict(store: &Store, text: &str) -> Result<()> {
 
 /// Prints dataset size, how many rows are trivial, and accuracy and balanced
 /// accuracy overall and over the most recent rows.
+///
+/// Those two lines use the probability each prompt got when it arrived, from
+/// a model that had not seen it yet. The "fit" line rescores every row with
+/// the current weights instead, so it measures how well the last refit
+/// matches its own training data and is close to 100% by construction.
 fn stats(store: &Store) -> Result<()> {
     let rows = store.read_dataset()?;
     let trivial = rows.iter().filter(|r| r.label).count();
     let all: Vec<(f32, bool)> = rows.iter().map(|r| (r.scored.p, r.label)).collect();
     let recent = &all[all.len().saturating_sub(RECENT)..];
+    let weights = store
+        .read_weights()?
+        .context("no weights yet: run `triage setup` first")?;
+    let fit: Vec<(f32, bool)> = rows
+        .iter()
+        .map(|r| (weights.predict(&r.scored.embedding), r.label))
+        .collect();
     println!(
         "rows: {} ({} trivial, {} not)",
         rows.len(),
@@ -242,6 +254,11 @@ fn stats(store: &Store) -> Result<()> {
         recent.len(),
         100.0 * accuracy(recent.iter().copied()),
         100.0 * balanced_accuracy(recent.iter().copied())
+    );
+    println!(
+        "accuracy of current weights on all data: {:.0}% (balanced {:.0}%)",
+        100.0 * accuracy(fit.iter().copied()),
+        100.0 * balanced_accuracy(fit.iter().copied())
     );
     Ok(())
 }

@@ -41,6 +41,11 @@ there for you to check; the running accuracy tells you how often it is right.
 The balanced accuracy is the mean of the hit rate on trivial prompts and the
 hit rate on not-trivial ones, so it stays at 50% for a model that always
 answers the majority class, where plain accuracy would look good.
+Both rates use the probability each prompt got when it arrived, from a model
+that had not seen it yet, so they estimate how the hook does on new prompts.
+`triage stats` also prints a "fit" line that rescores every row with the
+current weights; that one is close to 100% by construction and only shows
+how tightly the last refit matches its training data.
 The first predictions come from random weights, so they are a coin flip, and
 the weights stay random until both labels have been seen at least once (a fit
 on one class would predict that class for everything).
@@ -87,7 +92,7 @@ triage setup             download the model, create random initial weights
 triage hook              read UserPromptSubmit JSON on stdin, print one JSON line (used by the hook script)
 triage label trivial|not label the pending prompt by hand and refit
 triage predict "<text>"  score a text without keeping it pending
-triage stats             dataset size, class balance, accuracy and balanced accuracy
+triage stats             dataset size, class balance, accuracy and balanced accuracy, fit of the current weights
 ```
 
 `triage hook` prints `{"kind":"predict","verdict":"TRIVIAL","p":0.67,"chars":42}`
