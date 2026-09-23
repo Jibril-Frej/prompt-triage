@@ -27,7 +27,7 @@ const RECENT: usize = 50;
 /// without scoring. The embedding model only reads the first 512 tokens
 /// (roughly 2000 characters), so a longer prompt would be judged on its
 /// beginning alone, and a long request is not a two-minute task anyway.
-const LONG_PROMPT: usize = 1500;
+const LONG_PROMPT: usize = 300;
 
 #[derive(Parser)]
 #[command(about = "Local trivial-or-not classifier for coding-agent prompts")]

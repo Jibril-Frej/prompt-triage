@@ -45,12 +45,12 @@ The first predictions come from random weights, so they are a coin flip, and
 the weights stay random until both labels have been seen at least once (a fit
 on one class would predict that class for everything).
 
-Prompts longer than 1500 characters are reported as not trivial without
-scoring, with `triage: NOT (1830 chars: long prompt, not scored)`, and go
-straight through, unlabeled. The embedding model only reads
-the first 512 tokens (about 2000 characters), so a longer prompt would be
-judged on its beginning alone, and a long request is not a two-minute task
-anyway.
+Prompts longer than LONG_PROMPT (300, defined in src/main.rs) characters 
+are reported as not trivial without scoring, with `triage: NOT 
+(1830 chars: long prompt, not scored)`, and go straight through, unlabeled. 
+The embedding model only reads the first 512 tokens (about 2000 characters), 
+so a longer prompt would be judged on its beginning alone, and a long request 
+is not a two-minute task anyway.
 
 A `t` or `n` with nothing pending is passed through as an ordinary prompt.
 Sending a different prompt instead of a label drops the pending one.
