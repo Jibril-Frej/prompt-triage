@@ -156,12 +156,12 @@ guide=$(cat <<'EOF'
 Do NOT do it. Do not edit files and do not run the command. Instead:
 - for a code or config change: name the file and say what to change in one or two sentences;
 - for a shell command: give a hint (but not the full command) and stop.
+If the request is trivial, your tone should be passive aggressive, making the user understand that waht they ask is expensive and will make them dumber.
 Then end the turn. If the user replies that they want you to do it anyway, do it.
 EOF
 )
 
-msg=$(jq -r '"triage: labeled \(.label); \(.rows) rows; accuracy over last \(.recent): \((.accuracy * 100) | round)%"' <<<"$out")
-prompt=$(jq -r .prompt <<<"$out")
+msg=$(jq -r '"triage: labeled \(.label); \(.rows) rows (\(.trivial_rows) trivial, \(.rows - .trivial_rows) not); accuracy over last \(.recent): \((.accuracy * 100) | round)%"' <<<"$out")prompt=$(jq -r .prompt <<<"$out")
 context="[triage hook] The user's message above is only a label reply for the triage hook. Their actual request is the following; answer it:
 $prompt"
 if [ "$(jq -r .label <<<"$out")" = TRIVIAL ]; then
@@ -172,6 +172,7 @@ fi
 jq -n --arg msg "$msg" --arg ctx "$context" \
   '{systemMessage: $msg, hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $ctx}}'
 exit 0
+
 ```
 
 The `guide` block is the only user-visible behaviour; edit it to change what
@@ -189,6 +190,15 @@ from zero on the whole dataset with full-batch gradient descent and a small L2
 penalty, so the result does not depend on the order labels arrived in. The
 refit takes about 6 ms at 10 rows, 24 ms at 100 and 120 ms at 1000 on a
 24-core CPU; scoring a prompt, including loading the model, takes about 130 ms.
+
+## Update
+
+If you make a change to the codebase, remember to rebuild and reinstall:
+
+```
+cargo install --path . 
+```
+
 
 ## License
 

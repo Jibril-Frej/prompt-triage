@@ -108,22 +108,28 @@ fn hook(store: &Store) -> Result<()> {
         };
         store.clear_pending()?;
         let text = pending.prompt.clone();
-        let (rows, acc) = record(store, pending, trivial)?;
+        let (rows, acc, nb_trivial) = record(store, pending, trivial)?;
         println!(
             "{}",
-            json!({ "kind": "label", "label": label_name(trivial), "rows": rows, "recent": RECENT.min(rows), "accuracy": acc, "prompt": text })
+            json!({ "kind": "label", "label": label_name(trivial), "rows": rows, "trivial_rows": nb_trivial, "recent": RECENT.min(rows), "accuracy": acc, "prompt": text })
         );
         return Ok(());
     }
     if prompt.chars().count() > LONG_PROMPT {
-        println!("{}", json!({ "kind": "predict", "verdict": "NOT", "p": 0.0, "long": true }));
+        println!(
+            "{}",
+            json!({ "kind": "predict", "verdict": "NOT", "p": 0.0, "long": true })
+        );
         return Ok(());
     }
     let scored = score(store, prompt)?;
     store.write_pending(&scored)?;
     // Convert to f64 before rounding: JSON prints an f32 like 0.67 as 0.6700000166893005.
     let p = (scored.p as f64 * 100.0).round() / 100.0;
-    println!("{}", json!({ "kind": "predict", "verdict": verdict(scored.p), "p": p }));
+    println!(
+        "{}",
+        json!({ "kind": "predict", "verdict": verdict(scored.p), "p": p })
+    );
     Ok(())
 }
 
@@ -139,13 +145,17 @@ fn parse_label(prompt: &str) -> Option<bool> {
 
 /// Attaches the label to the pending prompt by hand (the hook normally does it).
 fn label_pending(store: &Store, trivial: bool) -> Result<()> {
-    let scored = store.read_pending()?.context("no pending prompt to label")?;
+    let scored = store
+        .read_pending()?
+        .context("no pending prompt to label")?;
     store.clear_pending()?;
-    let (rows, acc) = record(store, scored, trivial)?;
+    let (rows, acc, nb_trivial) = record(store, scored, trivial)?;
     println!(
-        "labeled {}; {} rows; accuracy over last {}: {:.0}%",
+        "labeled {}; {} rows ({} trivial, {} not); accuracy over last {}: {:.0}%",
         label_name(trivial),
         rows,
+        nb_trivial,
+        rows - nb_trivial,
         RECENT.min(rows),
         100.0 * acc
     );
@@ -159,17 +169,27 @@ fn label_pending(store: &Store, trivial: bool) -> Result<()> {
 /// Until both classes are present the weights are left as they are (the random
 /// ones from setup): a refit on rows of a single class would predict that class
 /// for everything with near certainty.
-fn record(store: &Store, scored: Scored, trivial: bool) -> Result<(usize, f32)> {
-    store.append_row(&Row { scored, label: trivial })?;
+fn record(store: &Store, scored: Scored, trivial: bool) -> Result<(usize, f32, usize)> {
+    store.append_row(&Row {
+        scored,
+        label: trivial,
+    })?;
     let rows = store.read_dataset()?;
+    let nb_trivial = rows.iter().filter(|r| r.label).count();
     let both_classes = rows.iter().any(|r| r.label) && rows.iter().any(|r| !r.label);
     if both_classes {
-        let examples: Vec<(&[f32], bool)> =
-            rows.iter().map(|r| (r.scored.embedding.as_slice(), r.label)).collect();
+        let examples: Vec<(&[f32], bool)> = rows
+            .iter()
+            .map(|r| (r.scored.embedding.as_slice(), r.label))
+            .collect();
         store.write_weights(&train(&examples, DIM))?;
     }
-    let recent = rows.iter().rev().take(RECENT).map(|r| (r.scored.p, r.label));
-    Ok((rows.len(), accuracy(recent)))
+    let recent = rows
+        .iter()
+        .rev()
+        .take(RECENT)
+        .map(|r| (r.scored.p, r.label));
+    Ok((rows.len(), accuracy(recent), nb_trivial))
 }
 
 /// Scores `text` and prints the verdict, for trying the model by hand.
@@ -185,10 +205,23 @@ fn stats(store: &Store) -> Result<()> {
     let rows = store.read_dataset()?;
     let trivial = rows.iter().filter(|r| r.label).count();
     let all = rows.iter().map(|r| (r.scored.p, r.label));
-    let recent = rows.iter().rev().take(RECENT).map(|r| (r.scored.p, r.label));
-    println!("rows: {} ({} trivial, {} not)", rows.len(), trivial, rows.len() - trivial);
+    let recent = rows
+        .iter()
+        .rev()
+        .take(RECENT)
+        .map(|r| (r.scored.p, r.label));
+    println!(
+        "rows: {} ({} trivial, {} not)",
+        rows.len(),
+        trivial,
+        rows.len() - trivial
+    );
     println!("accuracy overall: {:.0}%", 100.0 * accuracy(all));
-    println!("accuracy last {}: {:.0}%", RECENT.min(rows.len()), 100.0 * accuracy(recent));
+    println!(
+        "accuracy last {}: {:.0}%",
+        RECENT.min(rows.len()),
+        100.0 * accuracy(recent)
+    );
     Ok(())
 }
 
