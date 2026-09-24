@@ -20,7 +20,7 @@ definition of trivial from the labels you give.
 
 1. You submit a prompt. The hook embeds it with all-MiniLM-L6-v2, scores it
    with the current weights, keeps it pending, and **blocks** it with the
-   message `triage: TRIVIAL (0.67, 42 chars). Reply t (trivial) or n (not trivial).`
+   message `triage: TRIVIAL (0.67, 42 chars). Reply t (trivial), n (not trivial) or c (cancel).`
    Claude Code shows your prompt under that message. Nothing has been sent to
    the model yet.
 2. You reply with a single `t` or `n` (or `trivial` / `not`, any case). The
@@ -57,8 +57,21 @@ The embedding model only reads the first 512 tokens (about 2000 characters),
 so a longer prompt would be judged on its beginning alone, and a long request 
 is not a two-minute task anyway.
 
-A `t` or `n` with nothing pending is passed through as an ordinary prompt.
-Sending a different prompt instead of a label drops the pending one.
+Sent a prompt by mistake, for instance by pressing enter too early? Reply
+`c` (or `cancel`): the pending prompt is dropped without a label, the reply is
+blocked with `triage: cancelled`, and nothing reaches the model. Sending a
+different prompt instead of a reply also drops the pending one, and that new
+prompt is scored as usual.
+
+A `t`, `n` or `c` with nothing pending is passed through as an ordinary prompt.
+
+Claude Code itself submits prompts nobody typed: when a background task (a
+subagent or a monitor) finishes, its notification arrives through the same
+`UserPromptSubmit` event as a prompt starting with `<task-notification>`,
+preceded by a `[SYSTEM NOTIFICATION - NOT USER INPUT]` banner. The hook
+script passes those straight through: not scored, not blocked, not labeled,
+and never written to the dataset, so an idle session with background work
+does not keep asking for labels.
 
 There is no query selection (the "active" part of active learning): every
 prompt is labeled. Once accuracy is high, a natural next step is to only
@@ -99,8 +112,9 @@ triage stats             dataset size, class balance, accuracy and balanced accu
 for a prompt (`p` is the probability of trivial, `chars` the length of the
 prompt; `"long":true` is added when the prompt was too long to score),
 `{"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"balanced_accuracy":0.55,"prompt":"..."}`
-for a label reply (both rates are over the `recent` rows), and nothing for an empty prompt, a slash command, or a
-label reply with nothing pending.
+for a label reply (both rates are over the `recent` rows),
+`{"kind":"cancel"}` for a cancel reply, and nothing for an empty prompt, a
+slash command, or a label or cancel reply with nothing pending.
 
 ## Claude Code setup
 
@@ -139,13 +153,26 @@ itself is re-read on every prompt, so editing it needs no reload.
 triage=$(command -v triage || echo "$HOME/.cargo/bin/triage")
 log="$HOME/.local/share/prompt-triage/hook.log"
 
+# Claude Code also sends prompts nobody typed: when a background task (a
+# subagent, a monitor) finishes, its notification arrives through
+# UserPromptSubmit as a prompt starting with `<task-notification>` (in practice
+# preceded by a one-line `[SYSTEM NOTIFICATION - NOT USER INPUT]` banner). It
+# is not a request of the user's, so it is neither scored, blocked nor labeled:
+# it passes straight through, untouched, and never enters the dataset.
+input=$(cat)
+prompt=$(jq -r '.prompt // ""' <<<"$input")
+case "$(printf '%s' "$prompt" | sed -n '/[^[:space:]]/{p;q}')" in
+  "<task-notification>"*|"[SYSTEM NOTIFICATION - NOT USER INPUT]"*) exit 0 ;;
+esac
+
 # `triage hook` reads the hook JSON from stdin and prints one JSON line:
 # {"kind":"predict","verdict":"TRIVIAL","p":0.61,"chars":42}, with "long":true
 # when the prompt was too long to score, or
-# {"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"balanced_accuracy":0.55,"prompt":"..."}.
-# It prints nothing for slash commands, empty prompts, and a label reply with
-# nothing pending; errors go to the log file.
-out=$("$triage" hook 2>>"$log")
+# {"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"balanced_accuracy":0.55,"prompt":"..."},
+# or {"kind":"cancel"} when the user replied `c` to drop the pending prompt.
+# It prints nothing for slash commands, empty prompts, and a label or cancel
+# reply with nothing pending; errors go to the log file.
+out=$("$triage" hook <<<"$input" 2>>"$log")
 [ -z "$out" ] && exit 0
 
 if [ "$(jq -r .kind <<<"$out")" = predict ]; then
@@ -153,8 +180,14 @@ if [ "$(jq -r .kind <<<"$out")" = predict ]; then
     jq '{systemMessage: "triage: NOT (\(.chars) chars: long prompt, not scored)"}' <<<"$out"
     exit 0
   fi
-  reason=$(jq -r '"triage: \(.verdict) (\(.p), \(.chars) chars). Reply t (trivial) or n (not trivial)."' <<<"$out")
+  reason=$(jq -r '"triage: \(.verdict) (\(.p), \(.chars) chars). Reply t (trivial), n (not trivial) or c (cancel)."' <<<"$out")
   jq -n --arg r "$reason" '{decision: "block", reason: $r}'
+  exit 0
+fi
+
+# A cancel drops the pending prompt; block the `c` too so nothing reaches the model.
+if [ "$(jq -r .kind <<<"$out")" = cancel ]; then
+  jq -n '{decision: "block", reason: "triage: cancelled"}'
   exit 0
 fi
 

@@ -95,12 +95,24 @@ fn setup(store: &Store) -> Result<()> {
 /// prompt, refits the classifier and returns that prompt so the wrapper can
 /// hand it to the model:
 /// `{"kind":"label","label":"TRIVIAL","rows":12,"trivial_rows":5,"recent":12,"accuracy":0.58,"balanced_accuracy":0.55,"prompt":"..."}`.
+///
+/// A cancel reply (`c` or `cancel`, any case) drops the pending prompt
+/// without labeling it and prints `{"kind":"cancel"}`, so the wrapper can
+/// block the reply and nothing reaches the model.
 fn hook(store: &Store) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let input: serde_json::Value = serde_json::from_str(&input).context("parsing hook input")?;
     let prompt = input["prompt"].as_str().unwrap_or("").trim();
     if prompt.is_empty() || prompt.starts_with('/') {
+        return Ok(());
+    }
+    if is_cancel(prompt) {
+        if store.read_pending()?.is_none() {
+            return Ok(());
+        }
+        store.clear_pending()?;
+        println!("{}", json!({ "kind": "cancel" }));
         return Ok(());
     }
     if let Some(trivial) = parse_label(prompt) {
@@ -143,6 +155,11 @@ fn parse_label(prompt: &str) -> Option<bool> {
         "n" | "not" => Some(false),
         _ => None,
     }
+}
+
+/// Recognises a cancel reply: `c` or `cancel`, case does not matter.
+fn is_cancel(prompt: &str) -> bool {
+    matches!(prompt.to_ascii_lowercase().as_str(), "c" | "cancel")
 }
 
 /// Attaches the label to the pending prompt by hand (the hook normally does it).
